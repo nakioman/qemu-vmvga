@@ -593,6 +593,7 @@ struct vmsvga_state_s {
     struct vmsvga3d_dxvk_s *dxvk;
     bool debug;
     bool enable_3d;
+    bool enable_hwcursor;
     char *vgpu;
     enum vmsvga_vgpu_generation_e vgpu_generation;
     /* Guest-visible renderer capabilities are latched during realization. */
@@ -8495,6 +8496,9 @@ static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s)
             SVGA_FIFO_CAP_RESERVE | SVGA_FIFO_CAP_SCREEN_OBJECT |
             SVGA_FIFO_CAP_GMR2 | SVGA_FIFO_CAP_SCREEN_OBJECT_2;
 #endif
+    if (!s->enable_hwcursor) {
+        s->fc &= ~SVGA_FIFO_CAP_CURSOR_BYPASS_3;
+    }
 
 }
 
@@ -8519,6 +8523,16 @@ static uint32_t vmsvga_get_capabilities(struct vmsvga_state_s *s)
 #endif
     if (!s->svga3d_capable) {
         caps &= ~SVGA_CAP_3D;
+    }
+    /*
+     * Without a hardware cursor the guest draws its pointer into the
+     * framebuffer. VMware guests only report hardware cursor positions when
+     * an absolute pointing device (vmmouse) is in use; with a relative PS/2
+     * mouse the reported position stays at 0,0.
+     */
+    if (!s->enable_hwcursor) {
+        caps &= ~(SVGA_CAP_CURSOR | SVGA_CAP_CURSOR_BYPASS |
+                  SVGA_CAP_CURSOR_BYPASS_2 | SVGA_CAP_ALPHA_CURSOR);
     }
     if (s->svga3d_dx_capable) {
         caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
@@ -11869,6 +11883,8 @@ static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {
                        chip.debug, false),
       DEFINE_PROP_BOOL("3d", struct pci_vmsvga_state_s,
                        chip.enable_3d, true),
+      DEFINE_PROP_BOOL("hwcursor", struct pci_vmsvga_state_s,
+                       chip.enable_hwcursor, true),
       DEFINE_PROP_STRING("vgpu", struct pci_vmsvga_state_s, chip.vgpu),
       VMVGA_PROPERTY_END
 };
