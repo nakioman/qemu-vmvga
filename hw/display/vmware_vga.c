@@ -9868,10 +9868,16 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
                value);
         break;
     case SVGA_REG_BITS_PER_PIXEL:
+        /*
+         * 15/16 bpp guest modes are scanned out through a 16-bit pixman
+         * surface; DirectX 7 era games commonly request them.
+         */
 #ifdef CONFIG_PIXMAN
-        if (value == 8 || value == VMSVGA_HOST_BITS_PER_PIXEL) {
+        if (value == 8 || value == 15 || value == 16 ||
+            value == VMSVGA_HOST_BITS_PER_PIXEL) {
 #else
-        if (value == VMSVGA_HOST_BITS_PER_PIXEL) {
+        if (value == 15 || value == 16 ||
+            value == VMSVGA_HOST_BITS_PER_PIXEL) {
 #endif
           s->new_depth = value;
           vmsvga_try_commit_mode(s);
