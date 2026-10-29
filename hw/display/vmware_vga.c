@@ -594,6 +594,7 @@ struct vmsvga_state_s {
     bool debug;
     bool enable_3d;
     bool enable_hwcursor;
+    bool enable_gbobjects;
     char *vgpu;
     enum vmsvga_vgpu_generation_e vgpu_generation;
     /* Guest-visible renderer capabilities are latched during realization. */
@@ -8560,6 +8561,14 @@ static uint32_t vmsvga_get_capabilities(struct vmsvga_state_s *s)
         caps &= ~SVGA_CAP_CAP2_REGISTER;
     }
 
+    /*
+     * Without guest-backed objects the guest driver uses the classic
+     * framebuffer and screen-object model instead of screen targets.
+     */
+    if (!s->enable_gbobjects) {
+        caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
+                  SVGA_CAP_GBOBJECTS | SVGA_CAP_DX);
+    }
     return caps;
 }
 
@@ -11885,6 +11894,8 @@ static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {
                        chip.enable_3d, true),
       DEFINE_PROP_BOOL("hwcursor", struct pci_vmsvga_state_s,
                        chip.enable_hwcursor, true),
+      DEFINE_PROP_BOOL("gbobjects", struct pci_vmsvga_state_s,
+                       chip.enable_gbobjects, true),
       DEFINE_PROP_STRING("vgpu", struct pci_vmsvga_state_s, chip.vgpu),
       VMVGA_PROPERTY_END
 };
