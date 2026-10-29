@@ -1,0 +1,38 @@
+name: retrobox
+
+on:
+  push:
+    branches: [retrobox]
+    tags: ['retrobox-*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Debian 13 matches the RetroBox host, so the binary links against the
+    # same library versions the appliance installs.
+    container: debian:trixie
+    steps:
+      # git is needed before checkout so the package name carries the commit.
+      - name: Install git
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Build QEMU with vmvga and dxvk-native
+        run: retrobox/build.sh --install-deps
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-retrobox
+          path: retrobox/out/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/retrobox-')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: retrobox/out/*
