@@ -1,0 +1,28 @@
+GTK: force 4:3 output in fullscreen.
+
+A CRT displays every mode at 4:3. In fullscreen, scale the guest into the
+largest centred 4:3 box instead of stretching it to the window, so modes with
+other pixel aspects (the 720x400 text mode) look like they did on a monitor
+and non-4:3 screens are pillarboxed rather than distorted.
+
+--- ./ui/gtk.c
++++ ./ui/gtk.c
+@@ -824,8 +824,16 @@
+     }
+ 
+     if (vc->s->full_screen) {
+-        vc->gfx.scale_x = (double)ww / fbw;
+-        vc->gfx.scale_y = (double)wh / fbh;
++        /*
++         * A CRT shows every mode at 4:3: stretch the guest into the largest
++         * centred 4:3 box, whatever the mode's own pixel aspect (for example
++         * the 720x400 text mode).
++         */
++        double box_w = MIN((double)ww, wh * 4.0 / 3.0);
++        double box_h = box_w * 3.0 / 4.0;
++
++        vc->gfx.scale_x = box_w / fbw;
++        vc->gfx.scale_y = box_h / fbh;
+     } else if (vc->s->free_scale) {
+         double sx, sy;
+ 

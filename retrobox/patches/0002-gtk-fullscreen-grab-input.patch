@@ -1,0 +1,34 @@
+GTK: capture keyboard and pointer in fullscreen with grab-on-hover.
+
+With grab-on-hover the GTK display only grabs the keyboard while the pointer
+is over the window, and the pointer only after a click. In a fullscreen
+kiosk the guest should own all input from the start: also grab the pointer
+on enter, and keep the keyboard grab on leave, so host shortcuts such as
+Alt+F4 reach the guest instead of the window manager.
+
+--- ./ui/gtk.c
++++ ./ui/gtk.c
+@@ -1861,6 +1861,14 @@
+ 
+     if (gd_grab_on_hover(s)) {
+         gd_grab_keyboard(vc, "grab-on-hover");
++        /*
++         * A fullscreen kiosk VM owns the whole screen: also capture the
++         * pointer, so the guest gets the mouse without a click and host
++         * shortcuts such as Alt+F4 never reach the window manager.
++         */
++        if (s->full_screen && !qemu_input_is_absolute(vc->gfx.dcl.con)) {
++            gd_grab_pointer(vc, "grab-on-hover");
++        }
+     }
+     return TRUE;
+ }
+@@ -1871,7 +1879,7 @@
+     VirtualConsole *vc = opaque;
+     GtkDisplayState *s = vc->s;
+ 
+-    if (gd_grab_on_hover(s)) {
++    if (gd_grab_on_hover(s) && !s->full_screen) {
+         gd_ungrab_keyboard(s);
+     }
+     return TRUE;
