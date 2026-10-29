@@ -1,0 +1,75 @@
+GTK: force 4:3 output in fullscreen with gl=on.
+
+The OpenGL paths of the GTK display set their viewport with
+surface_gl_setup_viewport(), which keeps each guest mode's own aspect, so
+the 4:3 fullscreen scaling of gd_update_scale() only applied to gl=off.
+Add surface_gl_setup_viewport_aspect() and use it in fullscreen, so the
+image and the pointer mapping both use the centred 4:3 box.
+
+--- ./include/ui/console.h
++++ ./include/ui/console.h
+@@ -392,6 +392,8 @@
+                                DisplaySurface *surface);
+ void surface_gl_destroy_texture(QemuGLShader *gls,
+                                DisplaySurface *surface);
++void surface_gl_setup_viewport_aspect(QemuGLShader *gls, int ww, int wh,
++                                      int aspect_w, int aspect_h);
+ void surface_gl_setup_viewport(QemuGLShader *gls,
+                                DisplaySurface *surface,
+                                int ww, int wh);
+--- ./ui/console-gl.c
++++ ./ui/console-gl.c
+@@ -188,6 +188,21 @@
+     surface->texture = 0;
+ }
+ 
++/*
++ * Like surface_gl_setup_viewport(), but the image fills the largest centred
++ * box with the given display aspect ratio instead of the surface's own, the
++ * way a CRT showed every mode at 4:3.
++ */
++void surface_gl_setup_viewport_aspect(QemuGLShader *gls, int ww, int wh,
++                                      int aspect_w, int aspect_h)
++{
++    int bw = MIN(ww, wh * aspect_w / aspect_h);
++    int bh = bw * aspect_h / aspect_w;
++
++    assert(gls);
++    glViewport((ww - bw) / 2, (wh - bh) / 2, bw, bh);
++}
++
+ void surface_gl_setup_viewport(QemuGLShader *gls,
+                                DisplaySurface *surface,
+                                int ww, int wh)
+--- ./ui/gtk-egl.c
++++ ./ui/gtk-egl.c
+@@ -116,7 +116,12 @@
+         eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
+                        vc->gfx.esurface, vc->gfx.ectx);
+ 
+-        surface_gl_setup_viewport(vc->gfx.gls, vc->gfx.ds, pw, ph);
++        /* Match gd_update_scale(): fullscreen is a 4:3 box. */
++        if (vc->s->full_screen) {
++            surface_gl_setup_viewport_aspect(vc->gfx.gls, pw, ph, 4, 3);
++        } else {
++            surface_gl_setup_viewport(vc->gfx.gls, vc->gfx.ds, pw, ph);
++        }
+         surface_gl_render_texture(vc->gfx.gls, vc->gfx.ds);
+ 
+         eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
+--- ./ui/gtk-gl-area.c
++++ ./ui/gtk-gl-area.c
+@@ -138,7 +138,12 @@
+     } else {
+         gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
+ 
+-        surface_gl_setup_viewport(vc->gfx.gls, vc->gfx.ds, pw, ph);
++        /* Match gd_update_scale(): fullscreen is a 4:3 box. */
++        if (vc->s->full_screen) {
++            surface_gl_setup_viewport_aspect(vc->gfx.gls, pw, ph, 4, 3);
++        } else {
++            surface_gl_setup_viewport(vc->gfx.gls, vc->gfx.ds, pw, ph);
++        }
+         surface_gl_render_texture(vc->gfx.gls, vc->gfx.ds);
+     }
+ }

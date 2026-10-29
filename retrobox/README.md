@@ -24,6 +24,8 @@ RetroBox changes live on the `retrobox` branch.
 
 - `0001-gtk-fullscreen-force-4-3.patch`: fullscreen output is a centred 4:3
   box for every guest mode (the 720x400 text mode included), like a CRT.
+- `0003-gtk-gl-fullscreen-force-4-3.patch`: the same 4:3 box for the
+  OpenGL paths (`gl=on`), which set their own viewport.
 - `0002-gtk-fullscreen-grab-input.patch`: with `grab-on-hover=on` in
   fullscreen, keyboard and pointer are captured from the start, so host
   shortcuts such as Alt+F4 reach the guest.
