@@ -4901,14 +4901,14 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
         }
     }
 
-    if (!vmsvga3d_d3d9_clear_shadow_non_msaa(
-            s, command->cid, command->clearFlag, command->color,
-            command->depth, command->stencil, rect_count, rects,
-            &skipped_multisample_shadow)) {
-        g_free(d3d_rects);
-        return VMSVGA3D_D3D9_ACCEL_FAILED;
-    }
-
+    /*
+     * The targets are D3D9-resident (materialized above), and every CPU user
+     * of a resident surface reads it back first (see
+     * vmsvga3d_surface_readback_to_shadow()), so a GPU clear needs no CPU
+     * shadow clear. Clearing the shadows only on the fallback path avoids a
+     * full-surface memset per clear on the device thread, which dominated
+     * heavy D3D9 scenes (3DMark06).
+     */
     d3d_flags = vmsvga3d_d3d9_clear_flags(effective_clear_flags);
     if (d3d_flags != 0 &&
         vmsvga3d_dxvk_clear(
@@ -4917,6 +4917,14 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
             d3d_flags, plan->color, plan->depth, plan->stencil)) {
         g_free(d3d_rects);
         return VMSVGA3D_D3D9_ACCEL_COMPLETE;
+    }
+
+    if (!vmsvga3d_d3d9_clear_shadow_non_msaa(
+            s, command->cid, command->clearFlag, command->color,
+            command->depth, command->stencil, rect_count, rects,
+            &skipped_multisample_shadow)) {
+        g_free(d3d_rects);
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
 
     if (d3d_flags != 0) {
