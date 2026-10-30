@@ -69,6 +69,8 @@ struct vmsvga3d_dxvk_s {
     void *d3d9_pristine_state;
     VMSVGA3DDxvkD3D9Query *d3d9_queries;
     VMSVGA3DDxvkD3D9GBQuery *d3d9_gb_queries;
+    /* D3D9 event queries backing SVGA fences, indexed by fence slot. */
+    void *fence_queries[VMSVGA3D_DXVK_FENCE_SLOTS];
     GHashTable *d3d9_vertex_declarations;
     void *d3d9_legacy_present_render_target;
     void *d3d9_legacy_present_staging;
@@ -2546,6 +2548,18 @@ static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
         }
         g_free(query);
     }
+
+    {
+        uint32_t slot;
+
+        for (slot = 0; slot < VMSVGA3D_DXVK_FENCE_SLOTS; slot++) {
+            if (dxvk->fence_queries[slot] != NULL) {
+                vmsvga3d_dxvk_release(dxvk->fence_queries[slot],
+                                      VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE);
+                dxvk->fence_queries[slot] = NULL;
+            }
+        }
+    }
 #endif
 
     vmsvga3d_dxvk_d3d9_binding_cache_reset(dxvk);
@@ -3176,6 +3190,91 @@ uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk)
 {
     return dxvk != NULL && dxvk->ready;
+}
+
+/*
+ * SVGA fences signal GPU completion: an event query is issued after all D3D9
+ * work submitted so far, and the fence is published once it signals.
+ * Returns false if no query could be issued (the caller then treats the work
+ * as complete, as before).
+ */
+bool vmsvga3d_dxvk_fence_issue(VMSVGA3DDxvk *dxvk, uint32_t slot)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkCreateQuery create_query = NULL;
+    VMSVGA3DDxvkQueryIssue issue = NULL;
+    VMSVGA3DDxvkQueryGetData get_data = NULL;
+    uint32_t query_data = 0;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || slot >= VMSVGA3D_DXVK_FENCE_SLOTS) {
+        return false;
+    }
+
+    if (dxvk->fence_queries[slot] == NULL) {
+        if (!vmsvga3d_dxvk_get_method(
+                dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_QUERY,
+                &create_query, sizeof(create_query))) {
+            return false;
+        }
+        result = create_query(dxvk->d3d9_device,
+                              VMSVGA3D_DXVK_D3DQUERYTYPE_EVENT,
+                              &dxvk->fence_queries[slot]);
+        if (!vmsvga3d_dxvk_succeeded(result) ||
+            dxvk->fence_queries[slot] == NULL) {
+            dxvk->fence_queries[slot] = NULL;
+            return false;
+        }
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->fence_queries[slot], VMSVGA3D_DXVK_IDIRECT3DQUERY9_ISSUE,
+            &issue, sizeof(issue)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->fence_queries[slot], VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+            &get_data, sizeof(get_data))) {
+        return false;
+    }
+
+    result = issue(dxvk->fence_queries[slot], VMSVGA3D_DXVK_D3DISSUE_END);
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        return false;
+    }
+    /* Ask DXVK to submit now; S_FALSE (not yet complete) is expected. */
+    (void)get_data(dxvk->fence_queries[slot], &query_data,
+                   sizeof(query_data), VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
+    return true;
+#else
+    (void)dxvk;
+    (void)slot;
+    return false;
+#endif
+}
+
+/* Nonblocking: true once the slot's event query signalled (or is gone). */
+bool vmsvga3d_dxvk_fence_signalled(VMSVGA3DDxvk *dxvk, uint32_t slot)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkQueryGetData get_data = NULL;
+    uint32_t query_data = 0;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || slot >= VMSVGA3D_DXVK_FENCE_SLOTS ||
+        dxvk->fence_queries[slot] == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->fence_queries[slot], VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+            &get_data, sizeof(get_data))) {
+        return true;
+    }
+
+    result = get_data(dxvk->fence_queries[slot], &query_data,
+                      sizeof(query_data), VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
+    return result != VMSVGA3D_DXVK_D3D_S_FALSE;
+#else
+    (void)dxvk;
+    (void)slot;
+    return true;
+#endif
 }
 
 bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk)

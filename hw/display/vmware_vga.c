@@ -419,6 +419,9 @@ enum vmsvga_vgpu_generation_e {
     VMSVGA_VGPU_11 = 11,
 };
 
+/* Must match VMSVGA3D_DXVK_FENCE_SLOTS (checked in vmsvga_fence_defer()). */
+#define VMSVGA_FENCE_SLOTS 8
+
 struct vmsvga_state_s {
     uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
 #ifdef CONFIG_PIXMAN
@@ -522,6 +525,17 @@ struct vmsvga_state_s {
     bool active_cursor_position_valid;
     uint32_t fence;
     uint32_t fence_goal;
+    /*
+     * SVGA fences waiting for GPU completion, oldest first (see
+     * vmsvga_fence_defer()). Ring index i uses
+     * DXVK fence query slot i; fence_pending_query[i] is false when no query
+     * could be issued (the fence completes once its predecessors do).
+     */
+    uint32_t fence_pending_value[VMSVGA_FENCE_SLOTS];
+    bool fence_pending_query[VMSVGA_FENCE_SLOTS];
+    uint32_t fence_pending_head;
+    uint32_t fence_pending_count;
+    QEMUTimer *fence_timer;
     uint32_t fc;
     uint32_t ff;
     uint32_t *fifo;
@@ -5968,6 +5982,119 @@ static void vmsvga_trace_gmr2_sample(struct vmsvga_state_s *s)
     }
 }
 
+/*
+ * Honest fences. SVGA fences used to be published as soon as the FIFO parser
+ * reached them, while the D3D9 work before them was still queued in DXVK, so
+ * guests never waited for the GPU: frame counters ran far ahead of the
+ * display and the backlog grew until a synchronous readback drained it.
+ * With DXVK active, each fence is published only after a D3D9 event query
+ * issued behind the preceding work signals, and the parser stops taking new
+ * commands while VMSVGA_FENCE_BACKLOG fences are outstanding. Fences are only
+ * ever published later than before, never earlier.
+ */
+#define VMSVGA_FENCE_BACKLOG 3
+#define VMSVGA_FENCE_POLL_MS 1
+
+static void vmsvga_fence_publish(struct vmsvga_state_s *s, uint32_t value)
+{
+    uint32_t irq = 0;
+
+    s->fence = value;
+    if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
+        s->fifo[SVGA_FIFO_FENCE] = cpu_to_le32(value);
+    }
+    if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE_GOAL) &&
+        le32_to_cpu(s->fifo[SVGA_FIFO_FENCE_GOAL]) == value) {
+        irq |= SVGA_IRQFLAG_FENCE_GOAL;
+    }
+#ifndef ANY_FENCE_OFF
+    irq |= SVGA_IRQFLAG_ANY_FENCE;
+#endif
+
+    irq &= s->irq_mask;
+    irq &= ~s->irq_status;
+    if (irq) {
+        s->irq_status |= irq;
+#ifndef RAISE_IRQ_OFF
+        {
+            struct pci_vmsvga_state_s *pci_vmsvga =
+                container_of(s, struct pci_vmsvga_state_s, chip);
+            pci_set_irq(PCI_DEVICE(pci_vmsvga), 1);
+        }
+#endif
+    }
+}
+
+/* Publish completed fences in order; DXVK calls stay on the main loop. */
+static void vmsvga_fence_poll(struct vmsvga_state_s *s)
+{
+    bool published = false;
+
+    while (s->fence_pending_count != 0) {
+        uint32_t slot = s->fence_pending_head;
+
+        if (s->fence_pending_query[slot] &&
+            !vmsvga3d_dxvk_fence_signalled(s->dxvk, slot)) {
+            break;
+        }
+        s->fence_pending_head = (slot + 1) % VMSVGA_FENCE_SLOTS;
+        s->fence_pending_count--;
+        vmsvga_fence_publish(s, s->fence_pending_value[slot]);
+        published = true;
+    }
+
+    if (s->fence_pending_count != 0) {
+        timer_mod(s->fence_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                      VMSVGA_FENCE_POLL_MS);
+    }
+    if (published) {
+        /* The parser may be waiting for the backlog to shrink. */
+        qemu_bh_schedule(s->fifo_bh);
+    }
+}
+
+static void vmsvga_fence_timer(void *opaque)
+{
+    vmsvga_fence_poll(opaque);
+}
+
+/* Returns false when the fence should be published immediately. */
+static bool vmsvga_fence_defer(struct vmsvga_state_s *s, uint32_t value)
+{
+    uint32_t slot;
+    bool query;
+
+    QEMU_BUILD_BUG_ON(VMSVGA_FENCE_SLOTS != VMSVGA3D_DXVK_FENCE_SLOTS);
+
+    if (s->fence_pending_count == 0 &&
+        (s->dxvk == NULL || !vmsvga3d_dxvk_ready(s->dxvk))) {
+        return false;
+    }
+    if (s->fence_pending_count == VMSVGA_FENCE_SLOTS) {
+        /* Ring full (not reachable with the backlog cap): fall back to the
+         * previous behaviour for the oldest fence. */
+        slot = s->fence_pending_head;
+        s->fence_pending_head = (slot + 1) % VMSVGA_FENCE_SLOTS;
+        s->fence_pending_count--;
+        vmsvga_fence_publish(s, s->fence_pending_value[slot]);
+    }
+
+    slot = (s->fence_pending_head + s->fence_pending_count) %
+           VMSVGA_FENCE_SLOTS;
+    query = vmsvga3d_dxvk_fence_issue(s->dxvk, slot);
+    if (!query && s->fence_pending_count == 0) {
+        return false;
+    }
+
+    s->fence_pending_value[slot] = value;
+    s->fence_pending_query[slot] = query;
+    s->fence_pending_count++;
+    timer_mod(s->fence_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + VMSVGA_FENCE_POLL_MS);
+    return true;
+}
+
 static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
                             uint32_t dx_context)
 {
@@ -6071,6 +6198,15 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
                 }
             }
             continue;
+        }
+
+        if (s->fence_pending_count >= VMSVGA_FENCE_BACKLOG &&
+            !s->cb_fifo_scratch_in_use) {
+            vmsvga_fence_poll(s);
+            if (s->fence_pending_count >= VMSVGA_FENCE_BACKLOG) {
+                /* Leave the rest of the FIFO for when the GPU catches up. */
+                break;
+            }
         }
 
         fifo_start = s->fifo_stop;
@@ -7058,6 +7194,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
               }
               len -= command_words + 1;
               fence_arg = vmsvga_fifo_read(s);
+              if (!s->cb_fifo_scratch_in_use &&
+                  vmsvga_fence_defer(s, fence_arg)) {
+                  VPRINT("SVGA_CMD_FENCE %u deferred until GPU completion\n",
+                         fence_arg);
+                  break;
+              }
               s->fence = fence_arg;
               if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
                   s->fifo[SVGA_FIFO_FENCE] = cpu_to_le32(fence_arg);
@@ -7727,6 +7869,7 @@ static void vmsvga_fifo_bh(void *opaque)
         return;
     }
 
+    vmsvga_fence_poll(s);
     vmsvga_try_commit_mode(s);
     previous_stop = s->fifo_stop;
     vmsvga_fifo_run(s, false, SVGA3D_INVALID_ID);
@@ -9516,8 +9659,14 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
             s->trace_activity_seq++;
         }
         if (s->sync) {
-            vmsvga_try_commit_mode(s);
-            vmsvga_fifo_run(s, false, SVGA3D_INVALID_ID);
+            /*
+             * Guests poll BUSY in a tight loop while they wait for a fence.
+             * Running the FIFO here did the graphics work on the vCPU thread
+             * under the BQL, competing with the bottom half for every command.
+             * Only kick the bottom half; each poll re-arms it, so progress
+             * continues even when a pass stops early.
+             */
+            qemu_bh_schedule(s->fifo_bh);
         }
         ret = s->sync;
         /* vmware_value_read already traces this register when enabled. */
@@ -10593,6 +10742,8 @@ static void vmsvga_reset(DeviceState *dev)
     s->damage_count = 0;
     s->fence = 0;
     s->fence_goal = 0;
+    s->fence_pending_head = 0;
+    s->fence_pending_count = 0;
     s->thread = 0;
     s->invalidated = false;
     s->svga_surface_bound = false;
@@ -11562,6 +11713,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                                     &dev->mem_reentrancy_guard);
     s->cb_retry_timer = timer_new_ms(
         QEMU_CLOCK_VIRTUAL, vmsvga3d_command_buffer_retry_timer, s);
+    s->fence_timer = timer_new_ms(QEMU_CLOCK_REALTIME, vmsvga_fence_timer, s);
 
     vmsvga_trace_display_path_reset(s);
     vmsvga_trace_flight_reset(s);
@@ -11661,6 +11813,8 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->damage_count = 0;
     s->fence = 0;
     s->fence_goal = 0;
+    s->fence_pending_head = 0;
+    s->fence_pending_count = 0;
     s->invalidated = false;
     s->svga_surface_bound = false;
 
@@ -11850,6 +12004,11 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
         s->chip.fifo_bh = NULL;
     }
     vmsvga3d_command_buffer_discard(&s->chip, false, "unrealize");
+    if (s->chip.fence_timer != NULL) {
+        timer_del(s->chip.fence_timer);
+        timer_free(s->chip.fence_timer);
+        s->chip.fence_timer = NULL;
+    }
     if (s->chip.cb_retry_timer != NULL) {
         timer_del(s->chip.cb_retry_timer);
         timer_free(s->chip.cb_retry_timer);

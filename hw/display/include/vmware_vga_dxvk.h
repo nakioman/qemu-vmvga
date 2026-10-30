@@ -111,6 +111,11 @@ void vmsvga3d_dxvk_reset_guest_objects(VMSVGA3DDxvk *dxvk,
 void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk);
 /* Legacy SVGA3D is available once the D3D9 runtime is ready. */
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk);
+
+/* Event queries backing SVGA fences (see vmsvga_fence_*() in vmware_vga.c). */
+#define VMSVGA3D_DXVK_FENCE_SLOTS 8
+bool vmsvga3d_dxvk_fence_issue(VMSVGA3DDxvk *dxvk, uint32_t slot);
+bool vmsvga3d_dxvk_fence_signalled(VMSVGA3DDxvk *dxvk, uint32_t slot);
 /* vGPU10/DX is an optional upgrade and is never attempted before D3D9. */
 bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk);
 void vmsvga3d_dxvk_d3d11_flush(VMSVGA3DDxvk *dxvk);
