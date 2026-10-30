@@ -399,6 +399,9 @@ struct vmsvga3d_dxvk_surface_s {
     uint64_t d3d9_screen_readback_sequence;
     bool d3d9_resident;
     bool d3d9_has_bounce;
+    /* Resident vertex/index buffer older than its CPU shadow; refreshed with
+     * one DISCARD upload before the next draw uses it. */
+    bool d3d9_buffer_stale;
 
     VMSVGA3DD3D10CreateDesc d3d11_desc;
     void *d3d11_resource;
@@ -570,6 +573,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3DTEXF_NONE 0u
 #define VMSVGA3D_DXVK_D3DLOCK_READONLY 0x00000010u
 #define VMSVGA3D_DXVK_D3DLOCK_DISCARD 0x00002000u
+#define VMSVGA3D_DXVK_D3DLOCK_NOOVERWRITE 0x00001000u
 #define VMSVGA3D_DXVK_D3DQUERYTYPE_EVENT 8u
 #define VMSVGA3D_DXVK_D3DISSUE_END 1u
 #define VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH 0u
@@ -3567,6 +3571,8 @@ static void vmsvga3d_dxvk_surface_evict_d3d9(
         return;
     }
 
+    surface->d3d9_buffer_stale = false;
+
     vmsvga3d_dxvk_d3d9_binding_cache_invalidate_surface(
         surface->owner, surface);
     vmsvga3d_dxvk_d3d9_target_cache_invalidate_surface(
@@ -4259,6 +4265,7 @@ bool vmsvga3d_dxvk_surface_materialize(
     surface->d3d9_length = primary_desc->length;
     surface->d3d9_levels = primary_desc->levels;
     surface->d3d9_resident = true;
+    surface->d3d9_buffer_stale = false;
 
     if (resource_plan->use == VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET &&
         primary_desc->multisample_type !=
@@ -15800,9 +15807,68 @@ bool vmsvga3d_dxvk_surface_upload_buffer(
 #endif
 }
 
+static bool vmsvga3d_dxvk_surface_upload_buffer_range_flags(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t offset,
+    const void *data, uint32_t size, uint32_t lock_flags);
+
 bool vmsvga3d_dxvk_surface_upload_buffer_range(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t offset,
     const void *data, uint32_t size)
+{
+    return vmsvga3d_dxvk_surface_upload_buffer_range_flags(
+        dxvk, surface, offset, data, size, 0);
+}
+
+/*
+ * For SURFACE_DMA writes the guest flagged unsynchronized: the application
+ * promised not to overwrite data the GPU may still read (D3DLOCK_NOOVERWRITE),
+ * so the range can be written without waiting for the GPU.
+ */
+bool vmsvga3d_dxvk_surface_upload_buffer_range_unsynchronized(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t offset,
+    const void *data, uint32_t size)
+{
+    return vmsvga3d_dxvk_surface_upload_buffer_range_flags(
+        dxvk, surface, offset, data, size, VMSVGA3D_DXVK_D3DLOCK_NOOVERWRITE);
+}
+
+/*
+ * Legacy SURFACE_DMA writes into a resident vertex or index buffer only update
+ * the CPU shadow and mark the D3D9 buffer stale. The next draw refreshes it
+ * once with a DISCARD upload (DXVK renames the buffer, no GPU wait), merging
+ * all writes since the previous draw, instead of releasing the buffer and
+ * recreating it.
+ */
+void vmsvga3d_dxvk_buffer_mark_stale(VMSVGA3DDxvkSurface *surface)
+{
+    if (surface != NULL && surface->d3d9_resident &&
+        (surface->d3d9_resource_type ==
+             VMSVGA3D_D3D9_HOST_RESOURCE_VERTEX_BUFFER ||
+         surface->d3d9_resource_type ==
+             VMSVGA3D_D3D9_HOST_RESOURCE_INDEX_BUFFER)) {
+        surface->d3d9_buffer_stale = true;
+    }
+}
+
+bool vmsvga3d_dxvk_buffer_is_stale(const VMSVGA3DDxvkSurface *surface)
+{
+    return surface != NULL && surface->d3d9_buffer_stale;
+}
+
+bool vmsvga3d_dxvk_buffer_refresh(VMSVGA3DDxvk *dxvk,
+                                  VMSVGA3DDxvkSurface *surface,
+                                  const void *data, uint32_t size)
+{
+    if (!vmsvga3d_dxvk_surface_upload_buffer(dxvk, surface, data, size)) {
+        return false;
+    }
+    surface->d3d9_buffer_stale = false;
+    return true;
+}
+
+static bool vmsvga3d_dxvk_surface_upload_buffer_range_flags(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t offset,
+    const void *data, uint32_t size, uint32_t lock_flags)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkBufferLock lock = NULL;
@@ -15824,7 +15890,8 @@ bool vmsvga3d_dxvk_surface_upload_buffer_range(
         return false;
     }
 
-    result = lock(surface->d3d9_resource, offset, size, &destination, 0);
+    result = lock(surface->d3d9_resource, offset, size, &destination,
+                  lock_flags);
     if (!vmsvga3d_dxvk_succeeded(result) || destination == NULL) {
         return false;
     }
@@ -15839,6 +15906,7 @@ bool vmsvga3d_dxvk_surface_upload_buffer_range(
     (void)offset;
     (void)data;
     (void)size;
+    (void)lock_flags;
     return false;
 #endif
 }

@@ -604,6 +604,9 @@ bool vmsvga3d_d3d9_runtime_surface_info(
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_image(
     struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
     struct vmsvga3d_surface_image_s *image, uint32_t level);
+bool vmsvga3d_d3d9_runtime_upload_buffer_unsynchronized(
+    struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
+    const SVGA3dCopyBox *boxes, uint32_t box_count);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_upload_surface_image(
     struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
     struct vmsvga3d_surface_image_s *image, uint32_t level, uint32_t offset,

@@ -10313,8 +10313,14 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
         body->transfer == SVGA3D_WRITE_HOST_VRAM) {
         /* D3D11 boxes were updated above.  If this is a D3D9-resident
          * fallback, upload the coherent CPU shadow or evict an unsupported
-         * resource so the next use rematerializes from that shadow. */
-        vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, surface);
+         * resource so the next use rematerializes from that shadow.
+         * Unsynchronized buffer writes (D3DLOCK_NOOVERWRITE in the guest)
+         * go straight into the resident buffer instead. */
+        if (suffix == NULL || !suffix->flags.unsynchronized ||
+            !vmsvga3d_d3d9_runtime_upload_buffer_unsynchronized(
+                s, surface, boxes, box_count)) {
+            vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, surface);
+        }
     }
 
     if (valid && box_count != 0 && body->transfer == SVGA3D_WRITE_HOST_VRAM) {

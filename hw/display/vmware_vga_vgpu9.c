@@ -2509,6 +2509,50 @@ static bool vmsvga3d_dxvk_readback_image(
         dxvk, dxvk_surface, level, image->data, image->pitch, rows);
 }
 
+/*
+ * Upload the byte ranges of an unsynchronized SURFACE_DMA write straight into
+ * a resident, up-to-date vertex or index buffer. Returns false when the write
+ * does not qualify; the caller then marks the buffer stale instead.
+ */
+bool vmsvga3d_d3d9_runtime_upload_buffer_unsynchronized(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    const SVGA3dCopyBox *boxes, uint32_t box_count)
+{
+    VMSVGA3DD3D9TransferSurface info;
+    uint32_t i;
+
+    if (s == NULL || surface == NULL || boxes == NULL || box_count == 0 ||
+        surface->dxvk_surface == NULL || !vmsvga3d_dxvk_ready(s->dxvk) ||
+        !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
+        !info.resident || !vmsvga3d_d3d9_transfer_buffer(&info) ||
+        vmsvga3d_dxvk_buffer_is_stale(surface->dxvk_surface) ||
+        surface->mip_count != 1 || surface->mips == NULL ||
+        surface->mips[0].data == NULL ||
+        surface->mips[0].data_size < surface->storage_bytes) {
+        return false;
+    }
+
+    for (i = 0; i < box_count; i++) {
+        const SVGA3dCopyBox *box = &boxes[i];
+        uint64_t end = (uint64_t)box->x + box->w;
+
+        /* Buffers are one-dimensional byte arrays. */
+        if (box->y != 0 || box->z != 0 || box->h > 1 || box->d > 1 ||
+            box->w == 0 || end > surface->storage_bytes) {
+            return false;
+        }
+    }
+
+    for (i = 0; i < box_count; i++) {
+        if (!vmsvga3d_dxvk_surface_upload_buffer_range_unsynchronized(
+                s->dxvk, surface->dxvk_surface, boxes[i].x,
+                surface->mips[0].data + boxes[i].x, boxes[i].w)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_upload_surface_image(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DSurfaceImage *image, uint32_t level, uint32_t offset,
@@ -2803,6 +2847,13 @@ static void vmsvga3d_dxvk_sync_surface_from_cpu(struct vmsvga_state_s *s,
         return;
     }
 
+    /* Buffers are input-only, so the shadow stays authoritative; refresh the
+     * D3D9 buffer lazily before its next draw instead of evicting it. */
+    if (vmsvga3d_d3d9_transfer_buffer(&info)) {
+        vmsvga3d_dxvk_buffer_mark_stale(surface->dxvk_surface);
+        return;
+    }
+
     vmsvga3d_legacy_surface_evict(s, surface);
 }
 
@@ -3068,7 +3119,20 @@ static bool vmsvga3d_dxvk_materialize_buffer(
     if (vmsvga3d_dxvk_d3d9_buffer_compatible(
             surface->dxvk_surface, index_buffer,
             (uint32_t)surface->storage_bytes, native_format)) {
-        return true;
+        if (!vmsvga3d_dxvk_buffer_is_stale(surface->dxvk_surface)) {
+            return true;
+        }
+        /* CPU-shadow writes since the last draw: one DISCARD upload of the
+         * shadow keeps the resident buffer instead of recreating it. */
+        if (surface->mip_count == 1 && surface->mips != NULL &&
+            surface->mips[0].data != NULL &&
+            surface->mips[0].data_size >= surface->storage_bytes &&
+            vmsvga3d_dxvk_buffer_refresh(s->dxvk, surface->dxvk_surface,
+                                         surface->mips[0].data,
+                                         (uint32_t)surface->storage_bytes)) {
+            return true;
+        }
+        vmsvga3d_legacy_surface_evict(s, surface);
     }
 
     if (!vmsvga3d_dxvk_handoff_d3d11_to_shadow(s, surface) ||
