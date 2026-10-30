@@ -3012,10 +3012,23 @@ static bool vmsvga3d_dxvk_materialize_surface_ex(
     if (before.resident && !compatible) {
         /* Preserve GPU-written RGB contents before changing resource use.
          * Native input-only video simply retains the authoritative shadow. */
-        if (vmsvga3d_video_yuv(surface->format) &&
-            !vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface,
-                surface->format, 0, &surface->mips[0])) {
-            return false;
+        if (vmsvga3d_video_yuv(surface->format)) {
+            if (!vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface,
+                    surface->format, 0, &surface->mips[0])) {
+                return false;
+            }
+        } else {
+            uint32_t level;
+
+            /* GPU-only writes (draws, clears, copies, stretches) do not keep
+             * the CPU shadow current, and the shadow seeds the new resource
+             * below. Best effort: formats DXVK cannot read back keep the
+             * previous shadow. */
+            for (level = 0; level < surface->mip_count; level++) {
+                (void)vmsvga3d_dxvk_readback_image(
+                    s->dxvk, surface->dxvk_surface, surface->format, level,
+                    &surface->mips[level]);
+            }
         }
         vmsvga3d_legacy_surface_bindings_dirty(s, surface->sid);
     }
@@ -4422,19 +4435,8 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
         }
     }
 
-    for (i = 0; i < box_count; i++) {
-        if (!vmsvga3d_surface_copy_box(source, source_image, destination,
-                                       destination_image, &boxes[i], NULL, 0,
-                                       true, NULL)) {
-            if (!vmsvga3d_dxvk_readback_image(
-                    s->dxvk, destination->dxvk_surface, destination->format, destination_level,
-                    destination_image)) {
-                return VMSVGA3D_D3D9_ACCEL_FAILED;
-            }
-            break;
-        }
-    }
-
+    /* The destination is D3D9-resident and every CPU user of a resident
+     * surface reads it back first, so the GPU copy needs no CPU mirror. */
     return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }
 
@@ -4666,11 +4668,8 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
         }
     }
 
-    if (!vmsvga3d_dxvk_readback_image(s->dxvk, destination->dxvk_surface, destination->format,
-                                       destination_level, destination_image)) {
-        return VMSVGA3D_D3D9_ACCEL_FAILED;
-    }
-
+    /* As for surface copies: the resident destination is read back on demand
+     * by CPU users, so a synchronous full readback here only stalls the GPU. */
     return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }
 
