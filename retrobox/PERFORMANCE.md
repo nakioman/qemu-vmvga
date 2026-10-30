@@ -11,8 +11,22 @@ the display lags or freezes; one guest vCPU at 100% during 3D.
 
 ## Done
 
-- Clears: skip the CPU shadow clear when the D3D9 clear runs on the GPU
-  (`perf: skip CPU shadow clears ...`).
+Measured with 3DMark03 on the reference box. Before: unusable, display froze
+while the guest counter ran at ~500 fps. After items 1, 2-3, 5 and 6: smooth,
+no freezes, about 5% CPU, 200+ fps reported with the display in step.
+
+- Clears: skip the CPU shadow clear when the D3D9 clear runs on the GPU.
+- Item 1, buffer DMA: resident buffers are marked stale and refreshed with one
+  DISCARD upload per draw; unsynchronized writes upload in place. Biggest
+  single gain.
+- Items 2-3, copy/stretch mirrors: dropped; resource-use changes now read
+  GPU contents back first. No visible gain in 3DMark03, no regressions.
+- Items 5-6, pacing: fences published on GPU completion (event queries),
+  backlog capped at three fences, BUSY reads only kick the bottom half. Removed
+  the freezes.
+
+Open: flickering in 3DMark03 game test 4 ("Mother Nature", the only DX9 /
+Shader Model 2 test); present with every build so far, cause unknown.
 
 ## Batch 1: redundant CPU work (low risk)
 
