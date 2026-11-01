@@ -30,6 +30,11 @@ RetroBox changes live on the `retrobox` branch.
   fullscreen, keyboard and pointer are captured from the start, so host
   shortcuts such as Alt+F4 reach the guest.
 
+- `0004-ac97-keep-volume-across-voice-reopen.patch`: the AC97 codec's Master
+  and PCM Out volume are reapplied when the guest changes sample rate; before,
+  a reopened voice played at full volume and XP's master volume and mute had
+  no effect.
+
 ## Build
 
 On Debian 13 amd64, or anywhere with Docker:

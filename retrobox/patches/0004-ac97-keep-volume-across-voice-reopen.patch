@@ -1,0 +1,43 @@
+AC97: keep codec volume across voice reopen.
+
+open_voice() reopens the PCM voices when the guest changes the sample rate,
+and the audio layer resets a reopened voice to nominal volume. The codec
+Master and PCM Out (and Record Gain) settings were not reapplied, so a
+Windows XP guest could not change or mute the master volume: the next sound
+at a different rate played at full volume again. Reapply them after opening.
+
+--- ./hw/audio/ac97.c
++++ ./hw/audio/ac97.c
+@@ -306,6 +306,9 @@
+     return val;
+ }
+ 
++static void update_combined_volume_out(AC97LinkState *s);
++static void update_volume_in(AC97LinkState *s);
++
+ static void open_voice(AC97LinkState *s, int index, int freq)
+ {
+     struct audsettings as;
+@@ -327,6 +330,8 @@
+                 pi_callback,
+                 &as
+                 );
++            /* A reopened voice starts at nominal volume. */
++            update_volume_in(s);
+             break;
+ 
+         case PO_INDEX:
+@@ -338,6 +343,13 @@
+                 po_callback,
+                 &as
+                 );
++            /*
++             * Reopening the voice for a new sample rate resets it to nominal
++             * volume, so reapply the codec's Master and PCM Out settings;
++             * otherwise the guest's master volume and mute were lost at the
++             * next stream with a different rate.
++             */
++            update_combined_volume_out(s);
+             break;
+ 
+         case MC_INDEX:
