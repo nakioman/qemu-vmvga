@@ -814,6 +814,19 @@ bool vmsvga3d_d3d9_resource_plan(
     plan->normalized_surface_flags = vmsvga3d_d3d9_normalize_surface_flags(
         surface->surface_flags, surface->format);
     plan->requested_format = vmsvga3d_d3d9_surface_format(surface->format);
+    /* A D3D8/9 flip chain pairs an X8R8G8B8 front buffer with an A8R8G8B8
+     * back buffer and swaps their roles on every flip, so applications render
+     * into both.  Hardware stores the alpha bits of either, and games such as
+     * Prince of Persia: The Sands of Time keep a glow mask there and copy it
+     * out with StretchRect.  Store render-target-only X8R8G8B8 surfaces as
+     * A8R8G8B8 so that alpha survives; the guest did not ask to sample them,
+     * so no texture read sees the stored alpha instead of 1.0.  Test the
+     * guest's flags: normalization adds the texture hint to every X8R8G8B8. */
+    if (plan->requested_format == D3D9_FMT_X8R8G8B8 &&
+        (surface->surface_flags & SVGA3D_SURFACE_HINT_RENDERTARGET) &&
+        !(surface->surface_flags & SVGA3D_SURFACE_HINT_TEXTURE)) {
+        plan->requested_format = D3D9_FMT_A8R8G8B8;
+    }
     plan->actual_format =
         vmsvga3d_d3d9_actual_format(plan->requested_format, caps);
     plan->base_usage =

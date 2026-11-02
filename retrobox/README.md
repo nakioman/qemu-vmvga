@@ -19,6 +19,10 @@ RetroBox changes live on the `retrobox` branch.
   switches modes correctly.
 - 15/16 bpp guest modes are accepted, so XP offers 16-bit modes (DirectX 7
   era titles request 640x480x16).
+- Render-target-only X8R8G8B8 surfaces are stored as A8R8G8B8 on the host.
+  A flip chain pairs an X8R8G8B8 front buffer with an A8R8G8B8 back buffer and
+  swaps them on every flip; Prince of Persia: The Sands of Time keeps its glow
+  mask in back-buffer alpha and flickered washed-out on every other frame.
 
 ## QEMU patches (`retrobox/patches/`)
 
